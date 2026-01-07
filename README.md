@@ -136,12 +136,8 @@ flowchart LR
 - CSV形式でのデータエクスポート
 - 時系列データの一括ダウンロード
 - カスタマイズ可能なデータ範囲選択
+![Settings](Image/rankeing.png)
 
-### 1.7 ランキング表示
-![Rankings](Image/rankeing.png)
-- ユーザースコアのランキング表示
-- 活動レポートによるポイント獲得
-- コミュニティ機能
 
 ## 2. インストール
 
@@ -231,6 +227,7 @@ flowchart LR
 ### 4.1 API概要
 
 `BI_Tech_API.py`は、RainNet-MTシステムのバックエンドREST APIサーバーです。Flaskフレームワークを使用して実装されており、デスクトップアプリケーションとMySQLデータベース間の通信を提供します。
+![API](Image/API.png)
 
 #### APIアーキテクチャ
 
@@ -397,7 +394,7 @@ flowchart LR
 #### 基本的な起動方法
 
 ```bash
-python BI_Tech_API.py
+python API.py
 ```
 
 #### 環境変数による設定
@@ -409,18 +406,9 @@ APIサーバーは環境変数による設定をサポートしています：
 $env:MYSQL_HOST="127.0.0.1"
 $env:MYSQL_USER="root"
 $env:MYSQL_PASSWORD="your_password"
-$env:MYSQL_DATABASE="BI_Tech"
+$env:MYSQL_DATABASE=""
 $env:MYSQL_PORT="3306"
-python BI_Tech_API.py
-
-# Linux/macOS
-export MYSQL_HOST=127.0.0.1
-export MYSQL_USER=root
-export MYSQL_PASSWORD=your_password
-export MYSQL_DATABASE=BI_Tech
-export MYSQL_PORT=3306
-python BI_Tech_API.py
-```
+python API.py
 
 #### デフォルト設定
 
@@ -428,7 +416,7 @@ python BI_Tech_API.py
 - **MYSQL_HOST**: `127.0.0.1`
 - **MYSQL_USER**: `root`
 - **MYSQL_PASSWORD**: `default_password`
-- **MYSQL_DATABASE**: `BI_Tech`
+- **MYSQL_DATABASE**: `databasename`
 - **MYSQL_PORT**: `3306`
 
 ### 4.4 API使用例
@@ -630,6 +618,3 @@ sequenceDiagram
 
 ## 8. ライセンス
 このプロジェクトはMITライセンスの下で公開されています。詳細については[LICENSE](LICENSE)ファイルを参照してください。
-
-## 10. 開発チーム
-© 2026 RainNet-MT Team. All Rights Reserved.
