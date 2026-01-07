@@ -144,7 +144,7 @@ flowchart LR
 
 1. リポジトリをクローン：
 ```bash
-   git clone https://github.com/your-repo/RainNet-MT.git
+   git clone https://github.com/your-repo/RainNet-MT.git](https://github.com/liuyuanru123/RainNet-MT-rainfall-prediction-APP.git
    cd RainNet-MT
 ```
 
