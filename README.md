@@ -1,18 +1,10 @@
 # RainNet-MT-rainfall-prediction-APP
-# PyQt5ライブラリに基づくデスクトップアプリケーション
+## PyQt5ライブラリに基づくデスクトップアプリケーション
 
-<table>
-<tr>
-<td width="80%">
 本アプリケーションは、PyQt5ライブラリに基づくデスクトップアプリケーションであり、オフィスビルにおける室内環境モニタリングおよび降雨量予測システムとして設計されています。
 
 IoT技術を活用したRainNet-MT（Rainfall Network - Multi-Task）プラットフォームです。
-</td>
-<td width="20%" align="center">
-<img src="Fig/Networkconnecting.gif" width="150">
-</td>
-</tr>
-</table>
+
 
 ## 1. アプリケーション概要
 
