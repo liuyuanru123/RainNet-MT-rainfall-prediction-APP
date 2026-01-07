@@ -13,6 +13,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, pyqtPropert
 from PyQt5.QtGui import QFont, QColor, QPalette, QIcon, QMovie, QPixmap, QCursor
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.dates import DateFormatter, HourLocator
 import paho.mqtt.client as mqtt
 import requests
 import pymysql
@@ -24,21 +25,30 @@ try:
 except:
     NOTIFICATION_AVAILABLE = False
 
+# Try to import PyTorch for model inference
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("⚠️ PyTorch not available. Using heuristic prediction method.")
+
 # -----------------------------------------------------------------------------
 # Configuration & Constants
 # -----------------------------------------------------------------------------
 
 # MQTT Configuration
 MQTT_BROKER = ""
-MQTT_PORT = 
-MQTT_USER = ""
+MQTT_PORT = 8883
+MQTT_USER = "
 MQTT_PASSWORD = ""
-# Path to CA certificate (adjust if necessary)
 MQTT_CA_CERT = r"ca.crt"
 
 # Database Configuration
 MYSQL_HOST = ''
-MYSQL_USER = ''
+MYSQL_USER = 'root'
 MYSQL_PASSWORD = ''
 MYSQL_DATABASE = ''
 MYSQL_PORT = 3306
@@ -57,36 +67,364 @@ CITIES = {
 }
 
 # -----------------------------------------------------------------------------
+# RainNet-MT Model Architecture (for inference)
+# -----------------------------------------------------------------------------
+
+if TORCH_AVAILABLE:
+    class MultiScaleAttention(nn.Module):
+        """Multi-scale attention mechanism"""
+        def __init__(self, hidden_size, num_heads=8):
+            super().__init__()
+            self.num_heads = num_heads
+            self.head_dim = hidden_size // num_heads
+            assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
+            
+            self.query = nn.Linear(hidden_size, hidden_size)
+            self.key = nn.Linear(hidden_size, hidden_size)
+            self.value = nn.Linear(hidden_size, hidden_size)
+            self.out = nn.Linear(hidden_size, hidden_size)
+            self.dropout = nn.Dropout(0.1)
+        
+        def forward(self, x):
+            batch_size, seq_len, hidden_size = x.size()
+            Q = self.query(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            K = self.key(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            V = self.value(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            
+            attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.head_dim)
+            attention_weights = F.softmax(attention_scores, dim=-1)
+            attention_weights = self.dropout(attention_weights)
+            
+            attention_output = torch.matmul(attention_weights, V)
+            attention_output = attention_output.transpose(1, 2).contiguous().view(
+                batch_size, seq_len, hidden_size)
+            return self.out(attention_output)
+    
+    class FeaturePyramidNetwork(nn.Module):
+        """Feature Pyramid Network with optional dilated convolutions."""
+        def __init__(self, input_size, hidden_size, dilation_rates=(1, 2, 4, 8), use_dilated=True):
+            super().__init__()
+            self.use_dilated = use_dilated
+            self.conv_blocks = nn.ModuleList()
+            
+            if use_dilated:
+                configs = [(3, d) for d in dilation_rates]
+            else:
+                configs = [(k, 1) for k in (3, 5, 7)]
+            
+            for kernel_size, dilation in configs:
+                padding = dilation * (kernel_size - 1) // 2
+                block = nn.Sequential(
+                    nn.Conv1d(input_size, hidden_size, kernel_size=kernel_size,
+                              padding=padding, dilation=dilation),
+                    nn.BatchNorm1d(hidden_size),
+                    nn.GELU()
+                )
+                self.conv_blocks.append(block)
+            
+            self.num_paths = len(self.conv_blocks)
+            self.fusion = nn.Conv1d(hidden_size * self.num_paths, hidden_size, kernel_size=1)
+            self.dropout = nn.Dropout(0.2)
+        
+        def forward(self, x):
+            x = x.transpose(1, 2)  # [batch, features, time]
+            conv_features = [block(x) for block in self.conv_blocks]
+            fused = torch.cat(conv_features, dim=1)
+            fused = self.dropout(F.relu(self.fusion(fused)))
+            return fused.transpose(1, 2)
+    
+    class RainNetMTEnhanced(nn.Module):
+        """Enhanced RainNet-MT model for inference."""
+        def __init__(self, input_size, hidden_size=512, num_layers=6, num_classes=3,
+                     dropout=0.15, dilation_rates=(1, 2, 4, 8), recurrent_type='gru',
+                     use_bi_gru=False, use_attention=False, use_dilated_convs=True,
+                     use_conditional_tasking=False):
+            super().__init__()
+            self.num_classes = num_classes
+            self.hidden_size = hidden_size
+            self.use_attention = use_attention
+            self.use_conditional_tasking = use_conditional_tasking
+            self.recurrent_type = recurrent_type.lower()
+            self.use_bi_gru = use_bi_gru
+            
+            self.input_norm = nn.LayerNorm(input_size)
+            self.fpn = FeaturePyramidNetwork(
+                input_size, hidden_size // 2,
+                dilation_rates=dilation_rates,
+                use_dilated=use_dilated_convs
+            )
+            
+            rnn_cls = nn.GRU if self.recurrent_type == 'gru' else nn.LSTM
+            self.rnn = rnn_cls(
+                hidden_size // 2,
+                hidden_size,
+                num_layers=num_layers,
+                dropout=dropout if num_layers > 1 else 0,
+                bidirectional=use_bi_gru,
+                batch_first=True
+            )
+            self.sequence_dim = hidden_size * (2 if use_bi_gru else 1)
+            self.shared_dim = hidden_size // 2
+            
+            if use_attention:
+                self.multi_scale_attention = MultiScaleAttention(self.sequence_dim, num_heads=16)
+                self.global_attention = nn.Sequential(
+                    nn.Linear(self.sequence_dim, self.sequence_dim // 2),
+                    nn.Tanh(),
+                    nn.Linear(self.sequence_dim // 2, 1)
+                )
+            else:
+                self.multi_scale_attention = nn.Identity()
+                self.global_attention = None
+            
+            self.feature_extractor = nn.Sequential(
+                nn.Linear(self.sequence_dim, self.sequence_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(self.sequence_dim, self.sequence_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(self.sequence_dim // 2, self.shared_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            )
+            self.residual = nn.Linear(self.sequence_dim, self.shared_dim)
+            
+            self.occurrence_head = nn.Sequential(
+                nn.Linear(self.shared_dim, self.shared_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(self.shared_dim // 2, 1)
+            )
+            
+            intensity_input_dim = self.shared_dim + (1 if use_conditional_tasking else 0)
+            self.intensity_head = nn.Sequential(
+                nn.Linear(intensity_input_dim, self.shared_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(self.shared_dim, self.shared_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(self.shared_dim // 2, self.shared_dim // 4),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(self.shared_dim // 4, num_classes)
+            )
+        
+        def forward(self, x):
+            if x.dim() == 3 and x.size(-1) == 1:
+                x = x.squeeze(-1).unsqueeze(1)
+            elif x.dim() == 3:
+                x = x.transpose(1, 2)
+            else:
+                x = x.unsqueeze(1)
+            
+            x = self.input_norm(x)
+            x = self.fpn(x)
+            rnn_out, _ = self.rnn(x)
+            
+            if self.use_attention:
+                seq = self.multi_scale_attention(rnn_out)
+                att_logits = self.global_attention(seq)
+                attention_weights = F.softmax(att_logits, dim=1)
+                context = torch.sum(attention_weights * seq, dim=1)
+            else:
+                seq = rnn_out
+                context = torch.mean(seq, dim=1)
+            
+            features = self.feature_extractor(context)
+            residual = self.residual(context)
+            shared = features + residual
+            
+            occ_logits = self.occurrence_head(shared).squeeze(-1)
+            if self.use_conditional_tasking:
+                occ_prob = torch.sigmoid(occ_logits).unsqueeze(-1)
+                intensity_input = torch.cat([shared, occ_prob], dim=1)
+            else:
+                intensity_input = shared
+            intensity_logits = self.intensity_head(intensity_input)
+            
+            return {
+                'occurrence': occ_logits,
+                'intensity': intensity_logits
+            }
+
+# -----------------------------------------------------------------------------
 # RainNet-MT Engine
 # -----------------------------------------------------------------------------
 
 class RainNetMTEngine:
     """
-    Simulates the RainNet-MT model inference.
+    RainNet-MT model inference engine.
+    Supports both real model loading and fallback heuristic.
     """
-    def __init__(self):
+    def __init__(self, model_path=None, scaler_path=None, input_size=None):
         self.intensity_labels = ['No Rain', 'Light Rain', 'Medium Rain', 'Heavy Rain']
-
+        self.model = None
+        self.scaler = None
+        self.use_real_model = False
+        self.device = torch.device('cuda' if TORCH_AVAILABLE and torch.cuda.is_available() else 'cpu') if TORCH_AVAILABLE else None
+        self.input_size = input_size  # Number of features expected by model
+        
+        # Try to load real model if paths provided
+        if model_path and TORCH_AVAILABLE:
+            try:
+                import pickle
+                
+                # Check if model file exists
+                if os.path.exists(model_path):
+                    # Default model configuration (matching training script)
+                    model_kwargs = {
+                        'hidden_size': 512,
+                        'num_layers': 6,
+                        'dropout': 0.15,
+                        'dilation_rates': (1, 2, 4, 8),
+                        'recurrent_type': 'gru',
+                        'use_bi_gru': False,
+                        'use_attention': False,
+                        'use_dilated_convs': True,
+                        'use_conditional_tasking': False
+                    }
+                    
+                    # Try to infer input_size from scaler if available
+                    if scaler_path and os.path.exists(scaler_path):
+                        try:
+                            with open(scaler_path, 'rb') as f:
+                                self.scaler = pickle.load(f)
+                            # Infer input size from scaler
+                            if hasattr(self.scaler, 'n_features_in_'):
+                                self.input_size = self.scaler.n_features_in_
+                            elif hasattr(self.scaler, 'scale_'):
+                                self.input_size = len(self.scaler.scale_)
+                            print(f"✅ Scaler loaded from {scaler_path}")
+                            print(f"   Inferred input size: {self.input_size}")
+                        except Exception as e:
+                            print(f"⚠️ Could not load scaler: {e}")
+                    
+                    # If input_size still not set, use a default (will need to be adjusted)
+                    if self.input_size is None:
+                        self.input_size = 200  # Default, should match your feature count
+                        print(f"⚠️ Using default input_size: {self.input_size}")
+                    
+                    # Create and load model
+                    self.model = RainNetMTEnhanced(input_size=self.input_size, **model_kwargs)
+                    self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+                    self.model.to(self.device)
+                    self.model.eval()
+                    self.use_real_model = True
+                    print(f"✅ Model loaded from {model_path}")
+                    print(f"   Using device: {self.device}")
+                else:
+                    print(f"⚠️ Model file not found: {model_path}")
+            except Exception as e:
+                print(f"⚠️ Could not load model: {e}")
+                import traceback
+                traceback.print_exc()
+    
     def predict(self, current_data):
         """
         Predict occurrence and intensity based on current sensor readings.
+        Uses real model if available, otherwise uses enhanced heuristic.
         """
+        if self.use_real_model and self.model is not None:
+            try:
+                # Simplified feature extraction from current sensor data
+                # Note: Real model expects engineered features, but we'll use current values
+                # as a simplified approximation
+                features = self._extract_features(current_data)
+                
+                if features is not None and len(features) == self.input_size:
+                    # Scale features
+                    if self.scaler is not None:
+                        features_scaled = self.scaler.transform([features])
+                    else:
+                        features_scaled = np.array([features])
+                    
+                    # Reshape for model input: [batch, features, time]
+                    features_tensor = torch.FloatTensor(features_scaled).reshape(1, self.input_size, 1).to(self.device)
+                    
+                    # Model inference
+                    with torch.no_grad():
+                        output = self.model(features_tensor)
+                        intensity_logits = output['intensity']
+                        intensity_probs = F.softmax(intensity_logits, dim=1)
+                        intensity_idx = torch.argmax(intensity_probs, dim=1).item()
+                        
+                        # Convert to probability (sum of rain classes)
+                        # Model outputs: 0=Light, 1=Medium, 2=Heavy
+                        rain_prob = (intensity_probs[0][1] + intensity_probs[0][2]).item() * 100
+                        
+                        # Map model output to labels
+                        if intensity_idx == 0:
+                            label = 'No Rain'
+                        elif intensity_idx == 1:
+                            label = 'Light Rain'
+                        elif intensity_idx == 2:
+                            label = 'Medium Rain'
+                        else:
+                            label = 'Heavy Rain'
+                        
+                        return {
+                            'probability': rain_prob,
+                            'intensity_index': intensity_idx,
+                            'intensity_label': label,
+                            'attention_weights': {
+                                'Humidity': float(current_data.get('Humidity', 0)) / 100,
+                                'Pressure': max(0.1, (1020 - float(current_data.get('Pressure', 1013))) / 50),
+                                'Temperature': float(current_data.get('Ta', 25)) / 50,
+                                'Wind': float(current_data.get('Windspeed', 0)) / 20
+                            }
+                        }
+            except Exception as e:
+                print(f"⚠️ Model inference error: {e}. Falling back to heuristic.")
+                import traceback
+                traceback.print_exc()
+        
+        # Enhanced heuristic (fallback)
         rh = float(current_data.get('Humidity', 0))
         pressure = float(current_data.get('Pressure', 1013))
         wind = float(current_data.get('Windspeed', 0))
+        temp = float(current_data.get('Ta', 25))
         
-        # Heuristic Logic
+        # More sophisticated heuristic based on meteorological principles
         base_score = 0
-        if rh > 70: base_score += (rh - 70) * 2
-        if pressure < 1015: base_score += (1015 - pressure) * 3
-        if wind > 5: base_score += 10
         
-        prob = min(max(base_score / 1.2, 0), 100)
+        # Humidity contribution (most important)
+        if rh > 70:
+            base_score += (rh - 70) * 2.5
+        if rh > 85:
+            base_score += (rh - 85) * 3  # Extra weight for very high humidity
         
-        if prob < 40: intensity_idx = 0
-        elif prob < 70: intensity_idx = 1
-        elif prob < 90: intensity_idx = 2
-        else: intensity_idx = 3
+        # Pressure contribution (low pressure = higher rain chance)
+        if pressure < 1015:
+            base_score += (1015 - pressure) * 3.5
+        if pressure < 1000:
+            base_score += (1000 - pressure) * 5  # Extra weight for very low pressure
+        
+        # Wind contribution (moderate wind can indicate weather systems)
+        if 3 < wind < 10:
+            base_score += wind * 1.5
+        elif wind > 10:
+            base_score += 15  # Strong wind often accompanies storms
+        
+        # Temperature-humidity interaction
+        if rh > 80 and temp > 20:
+            base_score += 10  # Warm and humid = higher chance
+        
+        # Normalize to 0-100 probability
+        prob = min(max(base_score / 1.5, 0), 100)
+        
+        # Intensity classification (matching model output: 0=Light, 1=Medium, 2=Heavy)
+        if prob < 30:
+            intensity_idx = 0  # No Rain
+        elif prob < 50:
+            intensity_idx = 0  # No Rain (low probability)
+        elif prob < 70:
+            intensity_idx = 1  # Light Rain
+        elif prob < 85:
+            intensity_idx = 2  # Medium Rain
+        else:
+            intensity_idx = 3  # Heavy Rain
             
         return {
             'probability': prob,
@@ -95,10 +433,44 @@ class RainNetMTEngine:
             'attention_weights': {
                 'Humidity': max(0.1, rh/100),
                 'Pressure': max(0.1, (1020-pressure)/50),
-                'Temperature': 0.2,
+                'Temperature': max(0.1, temp/50),
                 'Wind': max(0.1, wind/20)
             }
         }
+    
+    def _extract_features(self, current_data):
+        """
+        Extract features from current sensor data.
+        This is a simplified version - real model needs engineered features.
+        For now, we pad with zeros or use current values.
+        """
+        try:
+            # Basic features from current data
+            features = []
+            
+            # Map sensor data to feature positions (simplified)
+            # Real model expects engineered features, so we'll create a basic vector
+            rh = float(current_data.get('Humidity', 0))
+            pressure = float(current_data.get('Pressure', 1013))
+            wind = float(current_data.get('Windspeed', 0))
+            temp = float(current_data.get('Ta', 25))
+            co2 = float(current_data.get('CO2', 400))
+            
+            # Create a basic feature vector (pad to expected size)
+            # This is a simplified approach - ideally should match training features
+            base_features = [rh, pressure, wind, temp, co2]
+            
+            # Pad or repeat to match expected input size
+            if self.input_size:
+                # Repeat and add variations to fill the feature vector
+                features = base_features * (self.input_size // len(base_features))
+                features += base_features[:self.input_size % len(base_features)]
+                return np.array(features[:self.input_size])
+            
+            return None
+        except Exception as e:
+            print(f"⚠️ Feature extraction error: {e}")
+            return None
 
 # -----------------------------------------------------------------------------
 # Screen Reminder (Functionality Restored)
@@ -147,7 +519,7 @@ class ModernCard(QFrame):
             QFrame {{
                 background-color: {bg_color};
                 border-radius: 14px;
-                border: 1px solid rgba(0,0,0,0.06);
+                border: 1px solid #FFFFFF;
             }}
             QLabel {{
                 background-color: transparent;
@@ -346,27 +718,59 @@ class ComprehensiveDashboard(QDialog):
         # Sample comprehensive visualization
         dates = pd.date_range(end=datetime.now(), periods=24, freq='H')
         
+        # Date formatter for x-axis
+        date_formatter = DateFormatter('%H:%M')
+        hour_locator = HourLocator(interval=3)  # Show every 3 hours
+        
         # Plot 1: Temperature
-        self.axes[0].plot(dates, np.random.normal(25, 2, 24), color='#FF3B30', linewidth=2)
-        self.axes[0].set_title("Temperature Trend", fontweight='bold')
+        self.axes[0].plot(dates, np.random.normal(25, 2, 24), color='#FF3B30', linewidth=2, marker='o', markersize=3)
+        self.axes[0].set_title("Temperature Trend", fontweight='bold', fontsize=12)
+        self.axes[0].set_xlabel("Time", fontsize=9)
+        self.axes[0].set_ylabel("Temperature (°C)", fontsize=9)
+        self.axes[0].xaxis.set_major_formatter(date_formatter)
+        self.axes[0].xaxis.set_major_locator(hour_locator)
+        self.axes[0].tick_params(axis='x', rotation=45, labelsize=8)
+        self.axes[0].tick_params(axis='y', labelsize=8)
         self.axes[0].grid(True, alpha=0.3)
         
         # Plot 2: Humidity
-        self.axes[1].plot(dates, np.random.normal(60, 10, 24), color='#5856D6', linewidth=2)
-        self.axes[1].set_title("Humidity Trend", fontweight='bold')
+        self.axes[1].plot(dates, np.random.normal(60, 10, 24), color='#5856D6', linewidth=2, marker='o', markersize=3)
+        self.axes[1].set_title("Humidity Trend", fontweight='bold', fontsize=12)
+        self.axes[1].set_xlabel("Time", fontsize=9)
+        self.axes[1].set_ylabel("Humidity (%)", fontsize=9)
+        self.axes[1].xaxis.set_major_formatter(date_formatter)
+        self.axes[1].xaxis.set_major_locator(hour_locator)
+        self.axes[1].tick_params(axis='x', rotation=45, labelsize=8)
+        self.axes[1].tick_params(axis='y', labelsize=8)
         self.axes[1].grid(True, alpha=0.3)
         
         # Plot 3: CO2
-        self.axes[2].plot(dates, np.random.normal(500, 100, 24), color='#FF9500', linewidth=2)
-        self.axes[2].set_title("CO2 Levels", fontweight='bold')
+        self.axes[2].plot(dates, np.random.normal(500, 100, 24), color='#FF9500', linewidth=2, marker='o', markersize=3)
+        self.axes[2].set_title("CO2 Levels", fontweight='bold', fontsize=12)
+        self.axes[2].set_xlabel("Time", fontsize=9)
+        self.axes[2].set_ylabel("CO2 (ppm)", fontsize=9)
+        self.axes[2].xaxis.set_major_formatter(date_formatter)
+        self.axes[2].xaxis.set_major_locator(hour_locator)
+        self.axes[2].tick_params(axis='x', rotation=45, labelsize=8)
+        self.axes[2].tick_params(axis='y', labelsize=8)
         self.axes[2].grid(True, alpha=0.3)
         
-        # Plot 4: Rain Probability
+        # Plot 4: Rain Probability (use dates for consistency)
+        hours = [d.strftime('%H:%M') for d in dates]
         self.axes[3].bar(range(24), np.random.randint(0, 80, 24), color='#007AFF', alpha=0.7)
-        self.axes[3].set_title("Rain Probability", fontweight='bold')
-        self.axes[3].grid(True, alpha=0.3)
+        self.axes[3].set_title("Rain Probability", fontweight='bold', fontsize=12)
+        self.axes[3].set_xlabel("Time", fontsize=9)
+        self.axes[3].set_ylabel("Probability (%)", fontsize=9)
+        # Set x-axis labels for every 3 hours to avoid overlap
+        tick_positions = list(range(0, 24, 3))
+        tick_labels = [hours[i] for i in tick_positions]
+        self.axes[3].set_xticks(tick_positions)
+        self.axes[3].set_xticklabels(tick_labels, rotation=45, ha='right', fontsize=8)
+        self.axes[3].tick_params(axis='y', labelsize=8)
+        self.axes[3].grid(True, alpha=0.3, axis='y')
         
-        plt.tight_layout()
+        # Adjust layout to prevent label overlap
+        plt.tight_layout(pad=2.5)
         self.canvas.draw()
         
     def export_data(self):
@@ -395,13 +799,13 @@ class AboutDialog(QDialog):
         layout = QVBoxLayout()
         layout.setContentsMargins(40, 40, 40, 40)
         
-        logo = QLabel()
-        movie = QMovie('Fig/Networkconnecting.gif')
-        movie.setScaledSize(QSize(100, 100))
-        logo.setMovie(movie)
-        movie.start()
-        logo.setAlignment(Qt.AlignCenter)
-        layout.addWidget(logo)
+        # logo = QLabel()
+        # movie = QMovie('Fig/Networkconnecting.gif')
+        # movie.setScaledSize(QSize(100, 100))
+        # logo.setMovie(movie)
+        # movie.start()
+        # logo.setAlignment(Qt.AlignCenter)
+        # layout.addWidget(logo)
         
         title = QLabel("RainNet-MT")
         title.setFont(QFont("Segoe UI", 26, QFont.Bold))
@@ -1163,7 +1567,27 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        self.rain_engine = RainNetMTEngine()
+        # Initialize RainNet-MT engine with model if available
+        model_path = r"D:\yuanru\daTA\enhanced_rainnet_plots\best_rainnet_enhanced_mt.pth"
+        scaler_path = r"D:\yuanru\daTA\enhanced_rainnet_plots\scaler.pkl"  # Adjust if different name
+        
+        # Check if scaler exists with different possible names
+        if not os.path.exists(scaler_path):
+            # Try alternative names or locations
+            alt_scaler = model_path.replace('best_rainnet_enhanced_mt.pth', 'scaler.pkl')
+            if os.path.exists(alt_scaler):
+                scaler_path = alt_scaler
+            else:
+                # Try to find scaler in same directory
+                model_dir = os.path.dirname(model_path)
+                alt_scaler = os.path.join(model_dir, 'scaler.pkl')
+                if os.path.exists(alt_scaler):
+                    scaler_path = alt_scaler
+        
+        self.rain_engine = RainNetMTEngine(
+            model_path=model_path if os.path.exists(model_path) else None,
+            scaler_path=scaler_path if os.path.exists(scaler_path) else None
+        )
         self.current_topic = "raspberry/mqtt"
         self.current_city = "Fukuoka"
         self.username = "User"
@@ -1292,15 +1716,25 @@ class MainWindow(QMainWindow):
         self.grid_layout.setContentsMargins(0, 10, 0, 10)
         
         self.sensors = {}
+        # 按类别组织：室内环境、室外气象、健康相关
+        # 室内环境（温湿度相关）- 蓝色系
+        INDOOR_COLOR = "#007AFF"  # 蓝色
+        # 室外气象 - 绿色系
+        OUTDOOR_COLOR = "#34C759"  # 绿色
+        # 健康相关（空气质量）- 橙色系
+        HEALTH_COLOR = "#FF9500"  # 橙色
+        
         sensor_configs = [
-            ("Temperature", "°C", 'Ta', "#FF3B30"),
-            ("Humidity", "%", 'Humidity', "#5856D6"),
-            ("Pressure", "hPa", 'Pressure', "#AF52DE"),
-            ("Wind Speed", "m/s", 'Windspeed', "#34C759"),
-            ("CO2", "ppm", 'CO2', "#FF9500"),
-            ("PM2.5", "μg/m³", 'PM2.5', "#FF2D55"),
-            ("PM10", "μg/m³", 'PM10', "#32ADE6"),
-            ("Globe Temp", "°C", 'Tg', "#FFCC00")
+            # 第一行：室内环境（前3个）+ 室外（1个）
+            ("Temperature", "°C", 'Ta', INDOOR_COLOR),      # 室内环境
+            ("Humidity", "%", 'Humidity', INDOOR_COLOR),     # 室内环境
+            ("Globe Temp", "°C", 'Tg', INDOOR_COLOR),        # 室内环境
+            ("Pressure", "hPa", 'Pressure', OUTDOOR_COLOR), # 室外气象
+            # 第二行：室外（1个）+ 健康相关（3个）
+            ("Wind Speed", "m/s", 'Windspeed', OUTDOOR_COLOR), # 室外气象
+            ("CO2", "ppm", 'CO2', HEALTH_COLOR),            # 健康相关
+            ("PM2.5", "μg/m³", 'PM2.5', HEALTH_COLOR),     # 健康相关
+            ("PM10", "μg/m³", 'PM10', HEALTH_COLOR)         # 健康相关
         ]
         
         row, col = 0, 0
@@ -1367,7 +1801,15 @@ class MainWindow(QMainWindow):
         self.mini_figure, self.mini_ax = plt.subplots(figsize=(9, 2.2))
         self.mini_figure.patch.set_facecolor('#FFFFFF')
         self.mini_ax.set_facecolor('#FAFAFA')
+        # Initialize with empty plot but proper axis range
+        self.mini_ax.set_xlim(0, 30)
+        self.mini_ax.set_ylim(0, 100)
         self.mini_ax.set_xlabel('Recent Updates', fontsize=9, color='#8E8E93')
+        self.mini_ax.set_ylabel('Probability (%)', fontsize=9, color='#8E8E93')
+        self.mini_ax.tick_params(labelsize=8, colors='#8E8E93')
+        self.mini_ax.grid(True, alpha=0.2, color='#E5E5EA')
+        self.mini_ax.text(15, 50, 'Waiting for data...', ha='center', va='center', 
+                         fontsize=10, color='#8E8E93', style='italic')
         self.mini_canvas = FigureCanvas(self.mini_figure)
         self.mini_canvas.setFixedHeight(200)
         self.mini_canvas.setStyleSheet("border: none;")
@@ -1520,19 +1962,37 @@ class MainWindow(QMainWindow):
             self.rain_history['probability'] = self.rain_history['probability'][-30:]
             self.rain_history['humidity'] = self.rain_history['humidity'][-30:]
         
-        # Redraw mini chart
-        if len(self.rain_history['probability']) > 1:
-            self.mini_ax.clear()
-            x_range = list(range(len(self.rain_history['probability'])))
-            self.mini_ax.plot(x_range, self.rain_history['probability'], color='#007AFF', linewidth=2, label='Rain Prob %')
-            self.mini_ax.fill_between(x_range, self.rain_history['probability'], alpha=0.3, color='#007AFF')
-            self.mini_ax.set_ylim(0, 100)
-            self.mini_ax.set_ylabel('Probability (%)', fontsize=9)
-            self.mini_ax.tick_params(labelsize=8)
-            self.mini_ax.grid(True, alpha=0.2)
-            self.mini_ax.legend(loc='upper left', fontsize=8)
-            plt.tight_layout()
-            self.mini_canvas.draw()
+        # Redraw mini chart - Always update when we have data
+        self.mini_ax.clear()
+        x_range = list(range(len(self.rain_history['probability'])))
+        
+        if len(x_range) > 0:
+            # Plot the probability line
+            self.mini_ax.plot(x_range, self.rain_history['probability'], color='#007AFF', 
+                            linewidth=2.5, marker='o', markersize=4, label='Rain Prob %', zorder=3)
+            # Fill area under curve
+            self.mini_ax.fill_between(x_range, self.rain_history['probability'], alpha=0.3, 
+                                    color='#007AFF', zorder=2)
+            # Add legend
+            self.mini_ax.legend(loc='upper left', fontsize=8, framealpha=0.9)
+        else:
+            # Show waiting message if no data yet
+            self.mini_ax.text(15, 50, 'Waiting for data...', ha='center', va='center', 
+                             fontsize=10, color='#8E8E93', style='italic')
+        
+        # Set axis properties
+        max_x = max(30, len(x_range) + 2) if len(x_range) > 0 else 30
+        self.mini_ax.set_xlim(-0.5, max_x)
+        self.mini_ax.set_ylim(0, 100)
+        self.mini_ax.set_xlabel('Recent Updates', fontsize=9, color='#8E8E93')
+        self.mini_ax.set_ylabel('Probability (%)', fontsize=9, color='#8E8E93')
+        self.mini_ax.tick_params(labelsize=8, colors='#8E8E93')
+        self.mini_ax.grid(True, alpha=0.2, color='#E5E5EA', zorder=1)
+        
+        # Force redraw
+        plt.tight_layout()
+        self.mini_canvas.draw()
+        self.mini_canvas.flush_events()  # Ensure immediate update
         
         # Smart Alerts (with cooldown to prevent spam)
         current_time = time.time()
@@ -1677,8 +2137,21 @@ class MainWindow(QMainWindow):
         self.intensity_label.setText("Waiting for sensor data...")
         self.intensity_label.setStyleSheet("color: #8E8E93;")
         
-        # Start demo mode timer
-        self.demo_timer.start(10000)  # 10 seconds
+        # Initialize chart - just show waiting message, don't add fake data
+        self.mini_ax.clear()
+        self.mini_ax.set_xlim(-0.5, 30)
+        self.mini_ax.set_ylim(0, 100)
+        self.mini_ax.set_xlabel('Recent Updates', fontsize=9, color='#8E8E93')
+        self.mini_ax.set_ylabel('Probability (%)', fontsize=9, color='#8E8E93')
+        self.mini_ax.tick_params(labelsize=8, colors='#8E8E93')
+        self.mini_ax.grid(True, alpha=0.2, color='#E5E5EA')
+        self.mini_ax.text(15, 50, 'Waiting for data...', ha='center', va='center', 
+                         fontsize=10, color='#8E8E93', style='italic')
+        plt.tight_layout()
+        self.mini_canvas.draw()
+        
+        # Start demo mode timer (shorter for faster feedback)
+        self.demo_timer.start(5000)  # 5 seconds - faster demo data
         
     def check_for_demo_mode(self):
         """If no real data received, show demo data."""
@@ -1686,22 +2159,55 @@ class MainWindow(QMainWindow):
         has_data = any(self.sensors[k].value_label.text() != "--" for k in self.sensors.keys())
         
         if not has_data:
-            # Generate demo data
+            # Generate demo data with some variation to show chart activity
+            import random
+            base_humidity = 65 + random.uniform(-5, 10)
             demo_data = {
-                'Ta': 23.5,
-                'Humidity': 68.0,
-                'Pressure': 1013.2,
-                'Windspeed': 2.3,
-                'CO2': 480,
-                'PM2.5': 15,
-                'PM10': 28,
-                'Tg': 24.1
+                'Ta': 23.5 + random.uniform(-1, 1),
+                'Humidity': base_humidity,
+                'Pressure': 1013.2 + random.uniform(-2, 2),
+                'Windspeed': 2.3 + random.uniform(-0.5, 0.5),
+                'CO2': 480 + random.randint(-20, 20),
+                'PM2.5': 15 + random.randint(-3, 3),
+                'PM10': 28 + random.randint(-5, 5),
+                'Tg': 24.1 + random.uniform(-0.5, 0.5)
             }
             self.process_data(demo_data)
             
             # Update status to indicate demo mode
             self.status_pill.setText(" Demo Mode ")
             self.status_pill.setStyleSheet("background-color: #FFF3E0; color: #FF9500; border-radius: 12px; padding: 6px 12px;")
+            
+            # Schedule periodic demo updates to show chart progression
+            if not hasattr(self, 'demo_update_timer'):
+                self.demo_update_timer = QTimer(self)
+                self.demo_update_timer.timeout.connect(self.update_demo_data)
+                self.demo_update_timer.start(3000)  # Update every 3 seconds
+    
+    def update_demo_data(self):
+        """Periodically update demo data to show chart progression."""
+        # Check if we still need demo mode
+        has_real_data = any(self.sensors[k].value_label.text() != "--" for k in self.sensors.keys())
+        if has_real_data:
+            # Stop demo updates if real data arrived
+            if hasattr(self, 'demo_update_timer'):
+                self.demo_update_timer.stop()
+            return
+        
+        # Generate new demo data with slight variations
+        import random
+        base_humidity = 65 + random.uniform(-5, 10)
+        demo_data = {
+            'Ta': 23.5 + random.uniform(-1, 1),
+            'Humidity': base_humidity,
+            'Pressure': 1013.2 + random.uniform(-2, 2),
+            'Windspeed': 2.3 + random.uniform(-0.5, 0.5),
+            'CO2': 480 + random.randint(-20, 20),
+            'PM2.5': 15 + random.randint(-3, 3),
+            'PM10': 28 + random.randint(-5, 5),
+            'Tg': 24.1 + random.uniform(-0.5, 0.5)
+        }
+        self.process_data(demo_data)
 
 # -----------------------------------------------------------------------------
 # Utilities
