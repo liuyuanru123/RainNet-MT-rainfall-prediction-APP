@@ -226,8 +226,6 @@ flowchart LR
 ### 4.1 API概要
 
 `API.py`は、RainNet-MTシステムのバックエンドREST APIサーバーです。Flaskフレームワークを使用して実装されており、デスクトップアプリケーションとMySQLデータベース間の通信を提供します。
-![API](Image/API.png)
-
 #### APIアーキテクチャ
 
 ```mermaid
