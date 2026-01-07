@@ -164,11 +164,4 @@ IoT技術を活用したRainNet-MT（Rainfall Network - Multi-Task）プラッ�
 ## 5. ライセンス
 このプロジェクトはMITライセンスの下で公開されています。詳細については[LICENSE](LICENSE)ファイルを参照してください。
 
-## 6. 参考文献
-詳細な情報については、以下の論文を参照してください：
-- __Yutong CHEN__,
-[Development of Low-Cost IoT Units for Thermal Comfort Measurement and AC Energy Consumption Prediction System](https://kth-my.sharepoint.com/personal/torunw_ug_kth_se/_layouts/15/onedrive.aspx?ga=1&id=%2Fpersonal%2Ftorunw%5Fug%5Fkth%5Fse%2FDocuments%2Fbox%5Ffiles%2FRoomVent%2FRoomVent%5F2024%5FProceedings%2F240425%201400a%20Session%2026%20IC%20Thermal%20comfort%201%2FPrint%20439%20Final%2Epdf&parent=%2Fpersonal%2Ftorunw%5Fug%5Fkth%5Fse%2FDocuments%2Fbox%5Ffiles%2FRoomVent%2FRoomVent%5F2024%5FProceedings%2F240425%201400a%20Session%2026%20IC%20Thermal%20comfort%201), RoomVent2024で発表。
-
-## 7. 開発チーム
-© 2026 RainNet-MT Team. All Rights Reserved.
 
