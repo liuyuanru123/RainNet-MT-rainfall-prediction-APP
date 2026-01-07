@@ -136,7 +136,7 @@ flowchart LR
 - 時系列データの一括ダウンロード
 - カスタマイズ可能なデータ範囲選択
 ![Settings](Image/rankeing.png)
-
+![12hforecasts](Image/forecast.png)
 
 ## 2. インストール
 
