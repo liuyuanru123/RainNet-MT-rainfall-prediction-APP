@@ -46,7 +46,7 @@ IoT技術を活用したRainNet-MT（降水確率・降水量両方予測モデ�
 
 </td>
 <td width="40%" align="center">
-  <img src="Image/00.png" width="75%" />
+  <img src="Image/00.png" width="100%" />
 </td>
 </tr>
 </table>
@@ -162,12 +162,13 @@ flowchart LR
 - 時系列データの一括ダウンロード
 - カスタマイズ可能なデータ範囲選択
 <div align="center">
-  <img src="Image/tag2.png" width="32%" />
-  <img src="Image/rankeing.png" width="32%" />
-  <img src="Image/forecast.png" width="32%" />
+  <img src="Image/tag2.png" width="48%" />
+  <img src="Image/rankeing.png" width="48%" />
 </div>
 
-
+<div align="center">
+  <img src="Image/forecast.png" width="60%" />
+</div>
 ## 2. インストール
 
 このプロジェクトをセットアップして実行するには、以下の手順に従ってください：
