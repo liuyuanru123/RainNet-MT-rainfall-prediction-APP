@@ -31,12 +31,25 @@ IoT技術を活用したRainNet-MT（降水確率・降水量両方予測モデ�
 - MySQLデータベースとの連携による履歴データの保存・閲覧
 - データ分析ダッシュボードによる包括的なデータ可視化
 - ユーザーフレンドリーなインターフェース設計（Apple/Googleネイティブスタイル）
-
+  
 ### 1.2 ログインウィンドウ
-![Login Window](Image/00.png)
+
+<table>
+<tr>
+<td width="60%">
+
 - 都市選択機能（日本国内6都市から選択可能）
 - ユーザー名の入力（オプション）
 - ゲストモードでの利用も可能
+
+</td>
+<td width="40%" align="center">
+  <img src="Image/00.png" width="100%" />
+</td>
+</tr>
+</table>
+
+
 
 ### 1.3 データ分析ダッシュボード
 - センサーデータの包括的な可視化
@@ -125,18 +138,21 @@ flowchart LR
 ```
 
 ### 1.5 データベーストレンド表示
-![Database Trend](Image/tag2.png)
+![Database Trend](Image/Dataex.png)
 - 各センサー指標の過去データをグラフで表示
 - データベースから直接データを取得
 - インタラクティブなデータ探索機能
 
 ### 1.6 データエクスポート機能
-![Data Export](Image/Dataex.png)
 - CSV形式でのデータエクスポート
 - 時系列データの一括ダウンロード
 - カスタマイズ可能なデータ範囲選択
-![Settings](Image/rankeing.png)
-![12hforecasts](Image/forecast.png)
+<div align="center">
+  <img src="Image/tag2.png" width="32%" />
+  <img src="Image/rankeing.png" width="32%" />
+  <img src="Image/forecast.png" width="32%" />
+</div>
+
 
 ## 2. インストール
 
