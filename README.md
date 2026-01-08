@@ -8,7 +8,9 @@ IoT技術を活用したRainNet-MT（降水確率・降水量両方予測モデ�
 ## 1. アプリケーション概要
 
 ### 1.1 メインウィンドウ
-![Main Window](Image/v.png)
+
+<img src="Image/v.png" width="500" align="right"/>
+
 メインウィンドウは、オフィス環境の包括的な概要を提供し、以下の3つの主要な側面に焦点を当てています：
 
 1). **室内環境モニタリング**
@@ -25,15 +27,15 @@ IoT技術を活用したRainNet-MT（降水確率・降水量両方予測モデ�
    - Open-Meteo APIを使用した現地天気情報の表示
    - 気温、風速、天候状況のリアルタイム更新
    - 日本国内6都市（福岡、東京、大阪、名古屋、札幌、仙台）の選択可能
+<br clear="right"/>
 
-追加機能：
+**追加機能：**
 - MQTTプロトコルによるリアルタイムデータ受信
 - MySQLデータベースとの連携による履歴データの保存・閲覧
 - データ分析ダッシュボードによる包括的なデータ可視化
 - ユーザーフレンドリーなインターフェース設計（Apple/Googleネイティブスタイル）
-  
-### 1.2 ログインウィンドウ
 
+### 1.2 ログインウィンドウ
 <table>
 <tr>
 <td width="60%">
@@ -44,10 +46,11 @@ IoT技術を活用したRainNet-MT（降水確率・降水量両方予測モデ�
 
 </td>
 <td width="40%" align="center">
-  <img src="Image/00.png" width="100%" />
+  <img src="Image/00.png" width="75%" />
 </td>
 </tr>
 </table>
+
 
 
 
@@ -138,10 +141,21 @@ flowchart LR
 ```
 
 ### 1.5 データベーストレンド表示
-![Database Trend](Image/Dataex.png)
+
+<table>
+<tr>
+<td width="40%">
+
 - 各センサー指標の過去データをグラフで表示
 - データベースから直接データを取得
 - インタラクティブなデータ探索機能
+
+</td>
+<td width="60%" align="center">
+  <img src="Image/Dataex.png" width="100%" />
+</td>
+</tr>
+</table>
 
 ### 1.6 データエクスポート機能
 - CSV形式でのデータエクスポート
